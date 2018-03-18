@@ -481,6 +481,7 @@ boolean chdkActive = false;
 //=============================Routines======================================
 //===========================================================================
 
+void quadratic_fit(float [][2],int,float*,float*,bool);
 void get_arc_coordinates();
 bool setTargetedHotend(int code);
 
@@ -3188,8 +3189,8 @@ void process_commands()
             int timeout = 0;
             int counter = 0;
             float last_temp = 0;
-            float equations[3][4];
-            memset(&equations, 0, sizeof(equations));
+            float measured_data[10][2];
+            memset(&measured_data, 0, sizeof(measured_data));
 
             int N = 0;
             while (1) {
@@ -3217,13 +3218,9 @@ void process_commands()
                 SERIAL_ECHOPGM("Z position (um): ");
                 MYSERIAL.print(1000 * current_position[Z_AXIS]);
                 SERIAL_ECHOLNPGM("");
-
-                for (int j = 0; j < 3; j++) {    // we will only fill what cannot be deduced by symmetry later
-                  equations[1][j] += pow(cur_temp_pinda, j + 1);
-                  equations[j][3] += 1000*current_position[Z_AXIS] * pow(cur_temp_pinda, j);
-                }
-                equations[0][0] += 1;
-                equations[2][2] += pow(cur_temp_pinda, 4);
+                
+                measured_data[N][0] = cur_temp_pinda;
+                measured_data[N][1] = 1000*current_position[Z_AXIS];
 
                 current_position[Z_AXIS] = PINDA_PREHEAT_Z;
                 plan_buffer_line(current_position[X_AXIS], current_position[Y_AXIS], current_position[Z_AXIS], current_position[E_AXIS], 3000 / 60, active_extruder);
@@ -3249,57 +3246,24 @@ void process_commands()
             }
 
             setTargetBed(0);
-
-            // Measurement finished, now we must process it - first fill in rest of the linear system matrix
-            equations[0][1] = equations[1][0];
-            equations[0][2] = equations[1][1];
-            equations[2][0] = equations[1][1];
-            equations[2][1] = equations[1][2];
-
-            int n = 3;                 // number of equations in the linear system
-            if (grey_pinda) {          // in this case we only need to solve 2*2 subsystem (linear fit)
-                for (int i=0;i<2;++i)  // move rhs column one position left
-                  equations[i][2]=equations[i][3];
-                n=2;
-            }
-
-
-            // Gaussian elimination
-            for (int i = 0; i < n; i++) {
-
-              for (int j = n; j >= i; j--)          // divide this equation to make to pivot 1
-                equations[i][j] /= equations[i][i];
-
-              for (int j = i + 1; j < n; j++)       // subtract proper multiple of the leading equation from all equations below
-                for (int k = n; k >= i; k--)
-                  equations[j][k] -= equations[i][k] * equations[j][i];
-            }
-
-            for (int i = n-1; i >= 0; i--) {        // back substitution - misusing right-hand side of the matrix for storing results
-              for (int j = n-1; j > i; j--)
-                equations[i][n] -= equations[i][j] * equations[j][n];
-            }
-
-            if (grey_pinda) {                       // copy results back to the last column
-              equations[0][3] = equations[0][2];
-              equations[1][3] = equations[1][2];
-              equations[2][3] = 0.f;
-            }
+            
+            float a=0, b=0;
+            quadratic_fit(measured_data,N,&a,&b,grey_pinda);
 
             SERIAL_ECHOLNPGM("");
             SERIAL_ECHOLNPGM("");
             SERIAL_ECHOLNPGM("Measurement finished, fit complete!");
             SERIAL_ECHOPGM("Quadratic coefficient ( 10^(-6)* (um/K) ): ");
-            MYSERIAL.print(1000000*equations[2][3]);
+            MYSERIAL.print(1000000*a);
             SERIAL_ECHOLNPGM("");
             SERIAL_ECHOPGM("Linear coefficient ( 10^(-6)* (um/K) ): ");
-            MYSERIAL.print(1000000*equations[1][3]);
+            MYSERIAL.print(1000000*b);
             SERIAL_ECHOLNPGM("");
 
 
             // we will only save quadratic and linear term, absolute is just a matter of choosing zero position
-            eeprom_update_float((float*)(EEPROM_PROBE_TEMP_SHIFT + 0 * sizeof(float)), grey_pinda ? 0.f : equations[2][3]); // quadratic term
-            eeprom_update_float((float*)(EEPROM_PROBE_TEMP_SHIFT + 1 * sizeof(float)), equations[1][3]); // linear term
+            eeprom_update_float((float*)(EEPROM_PROBE_TEMP_SHIFT + 0 * sizeof(float)), grey_pinda ? 0.f : a); // quadratic term
+            eeprom_update_float((float*)(EEPROM_PROBE_TEMP_SHIFT + 1 * sizeof(float)), b); // linear term
             eeprom_update_byte((uint8_t*)EEPROM_CALIBRATION_STATUS_PINDA, 1);
 
             SERIAL_ECHOLNPGM("Temperature calibration done. Continue with pressing the knob.");
@@ -7429,6 +7393,59 @@ float temp_comp_interpolation(float inp_temperature) {
 
 		return sum;
 
+}
+
+void quadratic_fit(float data[][2], int N, float* quadratic_coef, float* linear_coef, bool linear_fit)
+{
+    float equations[3][4];
+    memset(&equations,0,sizeof(equations));
+    for (int i = 0; i < N; i++) {
+        for (int j = 0; j < 3; j++) {    // we will only fill what cannot be deduced by symmetry later
+            equations[1][j] += pow(data[i][0], j + 1);
+            equations[j][3] += 1000*data[i][1] * pow(data[i][0], j);
+        }
+        equations[0][0] += 1;
+        equations[2][2] += pow(data[i][0], 4);
+    }
+            
+    // Measurement finished, now we must process it - first fill in rest of the linear system matrix
+    equations[0][1] = equations[1][0];
+    equations[0][2] = equations[1][1];
+    equations[2][0] = equations[1][1];
+    equations[2][1] = equations[1][2];
+
+    int n = 3;                 // number of equations in the linear system
+    if (linear_fit) {          // in this case we only need to solve 2*2 subsystem (linear fit)
+        for (int i=0;i<2;++i)  // move rhs column one position left
+          equations[i][2]=equations[i][3];
+        n=2;
+    }
+
+
+    // Gaussian elimination
+    for (int i = 0; i < n; i++) {
+
+      for (int j = n; j >= i; j--)          // divide this equation to make to pivot 1
+        equations[i][j] /= equations[i][i];
+
+      for (int j = i + 1; j < n; j++)       // subtract proper multiple of the leading equation from all equations below
+        for (int k = n; k >= i; k--)
+          equations[j][k] -= equations[i][k] * equations[j][i];
+    }
+
+    for (int i = n-1; i >= 0; i--) {        // back substitution - misusing right-hand side of the matrix for storing results
+      for (int j = n-1; j > i; j--)
+        equations[i][n] -= equations[i][j] * equations[j][n];
+    }
+
+    if (linear_fit) {                       // copy results back to the last column
+      equations[0][3] = equations[0][2];
+      equations[1][3] = equations[1][2];
+      equations[2][3] = 0.f;
+    }
+    
+    (*quadratic_coef) = equations[2][3];
+    (*linear_coef)    = equations[1][3];
 }
 
 #ifdef PINDA_THERMISTOR
