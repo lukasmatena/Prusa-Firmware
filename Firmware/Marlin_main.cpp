@@ -3175,12 +3175,12 @@ void process_commands()
             current_position[Y_AXIS] = pgm_read_float(bed_ref_points + 2 * (6) + 1);
             current_position[Z_AXIS] = PINDA_PREHEAT_Z + 200.f;
 
-            /*plan_buffer_line(current_position[X_AXIS], current_position[Y_AXIS], current_position[Z_AXIS], current_position[E_AXIS], 3000 / 60, active_extruder);
+            plan_buffer_line(current_position[X_AXIS], current_position[Y_AXIS], current_position[Z_AXIS], current_position[E_AXIS], 3000 / 60, active_extruder);
             st_synchronize();
             while (current_temperature_bed < 109) {
               delay_keep_alive(1000);
               serialecho_temperatures();
-            }*/
+            }
 
             current_position[Z_AXIS] = PINDA_PREHEAT_Z;
             plan_buffer_line(current_position[X_AXIS], current_position[Y_AXIS], current_position[Z_AXIS], current_position[E_AXIS], 3000 / 60, active_extruder);
