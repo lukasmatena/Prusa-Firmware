@@ -481,7 +481,7 @@ boolean chdkActive = false;
 //=============================Routines======================================
 //===========================================================================
 
-void quadratic_fit(float [][2],int,float*,float*,bool);
+void quadratic_fit(int [][2],int,float*,float*,bool);
 void get_arc_coordinates();
 bool setTargetedHotend(int code);
 
@@ -3175,12 +3175,12 @@ void process_commands()
             current_position[Y_AXIS] = pgm_read_float(bed_ref_points + 2 * (6) + 1);
             current_position[Z_AXIS] = PINDA_PREHEAT_Z + 200.f;
 
-            plan_buffer_line(current_position[X_AXIS], current_position[Y_AXIS], current_position[Z_AXIS], current_position[E_AXIS], 3000 / 60, active_extruder);
+            /*plan_buffer_line(current_position[X_AXIS], current_position[Y_AXIS], current_position[Z_AXIS], current_position[E_AXIS], 3000 / 60, active_extruder);
             st_synchronize();
             while (current_temperature_bed < 109) {
               delay_keep_alive(1000);
               serialecho_temperatures();
-            }
+            }*/
 
             current_position[Z_AXIS] = PINDA_PREHEAT_Z;
             plan_buffer_line(current_position[X_AXIS], current_position[Y_AXIS], current_position[Z_AXIS], current_position[E_AXIS], 3000 / 60, active_extruder);
@@ -3189,9 +3189,9 @@ void process_commands()
             int timeout = 0;
             int counter = 0;
             float last_temp = 0;
-            float measured_data[10][2];
+            int measured_data[10][2];
             memset(&measured_data, 0, sizeof(measured_data));
-
+            
             int N = 0;
             while (1) {
               delay_keep_alive(1000);
@@ -3219,8 +3219,8 @@ void process_commands()
                 MYSERIAL.print(1000 * current_position[Z_AXIS]);
                 SERIAL_ECHOLNPGM("");
                 
-                measured_data[N][0] = cur_temp_pinda;
-                measured_data[N][1] = 1000*current_position[Z_AXIS];
+                measured_data[N][0] = 10*cur_temp_pinda;                 // T measured in 10*C, 
+                measured_data[N][1] = current_position[Z_AXIS] * 1000.f; // z shift in um
 
                 current_position[Z_AXIS] = PINDA_PREHEAT_Z;
                 plan_buffer_line(current_position[X_AXIS], current_position[Y_AXIS], current_position[Z_AXIS], current_position[E_AXIS], 3000 / 60, active_extruder);
@@ -3230,6 +3230,7 @@ void process_commands()
                 counter = 0;
                 timeout = 0;
                 ++N;
+                if (N==10) break; // to prevent buffer overflow on 'measured_data'
                 continue;
               }
 
@@ -3253,17 +3254,20 @@ void process_commands()
             SERIAL_ECHOLNPGM("");
             SERIAL_ECHOLNPGM("");
             SERIAL_ECHOLNPGM("Measurement finished, fit complete!");
-            SERIAL_ECHOPGM("Quadratic coefficient ( 10^(-6)* (um/K) ): ");
+            SERIAL_ECHOPGM("Quadratic coefficient ( 10^(-6) * um/K ): ");
             MYSERIAL.print(1000000*a);
             SERIAL_ECHOLNPGM("");
-            SERIAL_ECHOPGM("Linear coefficient ( 10^(-6)* (um/K) ): ");
+            SERIAL_ECHOPGM("Linear coefficient ( 10^(-6) * um/K ): ");
             MYSERIAL.print(1000000*b);
             SERIAL_ECHOLNPGM("");
 
 
-            // we will only save quadratic and linear term, absolute is just a matter of choosing zero position
-            eeprom_update_float((float*)(EEPROM_PROBE_TEMP_SHIFT + 0 * sizeof(float)), grey_pinda ? 0.f : a); // quadratic term
-            eeprom_update_float((float*)(EEPROM_PROBE_TEMP_SHIFT + 1 * sizeof(float)), b); // linear term
+            float zero_z = a*pow(35,2) + b*35;
+            for (int i=0;i<5;++i) {
+                int z_shift = (int)((((a*pow(40+5*i,2.f)+b*(40+5*i)-zero_z)) * axis_steps_per_unit[Z_AXIS]) / 1000.f); // convert to steps
+                EEPROM_save_B(EEPROM_PROBE_TEMP_SHIFT + i * 2, &z_shift);
+            }
+            
             eeprom_update_byte((uint8_t*)EEPROM_CALIBRATION_STATUS_PINDA, 1);
 
             SERIAL_ECHOLNPGM("Temperature calibration done. Continue with pressing the knob.");
@@ -7395,20 +7399,20 @@ float temp_comp_interpolation(float inp_temperature) {
 
 }
 
-void quadratic_fit(float data[][2], int N, float* quadratic_coef, float* linear_coef, bool linear_fit)
+void quadratic_fit(int data[][2], int N, float* quadratic_coef, float* linear_coef, bool linear_fit)
 {
     float equations[3][4];
     memset(&equations,0,sizeof(equations));
     for (int i = 0; i < N; i++) {
-        for (int j = 0; j < 3; j++) {    // we will only fill what cannot be deduced by symmetry later
-            equations[1][j] += pow(data[i][0], j + 1);
-            equations[j][3] += 1000*data[i][1] * pow(data[i][0], j);
+        for (int j = 0; j < 3; j++) {                        // we will only fill what cannot be deduced by symmetry later
+            equations[1][j] += pow(data[i][0]/10.f, j + 1);  // temperature was passed in tenths of degrees to avoid rounding
+            equations[j][3] += data[i][1] * pow(data[i][0]/10.f, j);
         }
         equations[0][0] += 1;
-        equations[2][2] += pow(data[i][0], 4);
+        equations[2][2] += pow(data[i][0]/10.f, 4);
     }
             
-    // Measurement finished, now we must process it - first fill in rest of the linear system matrix
+    // fills in rest of the linear system matrix:
     equations[0][1] = equations[1][0];
     equations[0][2] = equations[1][1];
     equations[2][0] = equations[1][1];
@@ -7445,8 +7449,10 @@ void quadratic_fit(float data[][2], int N, float* quadratic_coef, float* linear_
     }
     
     (*quadratic_coef) = equations[2][3];
-    (*linear_coef)    = equations[1][3];
+    (*linear_coef)    = equations[1][3];  // the coefficients in um/K^2 and um/K
 }
+
+
 
 #ifdef PINDA_THERMISTOR
 float temp_compensation_pinda_thermistor_offset(float temperature_pinda)
@@ -7455,11 +7461,17 @@ float temp_compensation_pinda_thermistor_offset(float temperature_pinda)
   if (!calibration_status_pinda()) return 0;
 //  return temp_comp_interpolation(temperature_pinda) / axis_steps_per_unit[Z_AXIS];
 
-// first we must recover parameters of the parabolic fit
-  float a = eeprom_read_float((float*)(EEPROM_PROBE_TEMP_SHIFT));
-  float b = eeprom_read_float((float*)(EEPROM_PROBE_TEMP_SHIFT + sizeof(float)));
+// let's recover eeprom values (in steps/mm)
+  int data[5][2];
+  for (int i=0;i<5;++i) {
+      EEPROM_read_B(EEPROM_PROBE_TEMP_SHIFT + i * 2, &data[i][1]);
+      data[i][0] = 10 * (40 + 5*i);                                        // quadratic_fit expects temperature in tenths of degrees
+      data[i][1] = ( data[i][1] * 1000.f ) / axis_steps_per_unit[Z_AXIS]; // converts steps/mm to um
+  }
+  float a=0,b=0;
+  quadratic_fit(data,5,&a,&b,false); // now we'll recover parameters of the fit
 
-  float zero_temp = 50.f;  // the fit will equal zero at this temperature
+  float zero_temp = 35.f;  // the fit will equal zero at this temperature
   return (a*pow(temperature_pinda,2) + b*temperature_pinda - zero_temp*(zero_temp*a+b)) / 1000.f;  // return distance in mm
 }
 #endif //PINDA_THERMISTOR
